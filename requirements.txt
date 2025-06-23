@@ -1,5 +1,3 @@
 fastapi
+httpx
 uvicorn
-playwright
-async-exit-stack
-async-generator
