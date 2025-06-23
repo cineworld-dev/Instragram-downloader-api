@@ -5,31 +5,38 @@ import re
 
 app = FastAPI()
 
-def is_instagram_reel_url(url: str) -> bool:
-    return bool(re.match(r'https?://(www\.)?instagram\.com/reel/[a-zA-Z0-9_-]+/?', url))
+def is_valid_instagram_reel_url(url: str) -> bool:
+    pattern = r'https?://(www\.)?instagram\.com/reel/[a-zA-Z0-9_-]+/?'
+    return bool(re.match(pattern, url))
 
 @app.get("/")
-async def download_reel(request: Request):
+async def instagram_reel_downloader(request: Request):
     url = request.query_params.get("url")
-    if not url or not is_instagram_reel_url(url):
-        return JSONResponse({"status": "error", "message": "❌ Invalid or missing Instagram Reel URL"})
+    if not url or not is_valid_instagram_reel_url(url):
+        return JSONResponse({
+            "status": "error",
+            "message": "❌ Invalid or missing Instagram Reel URL."
+        })
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
 
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        }
-
         async with httpx.AsyncClient(headers=headers, timeout=10) as client:
-            res = await client.get(url)
-            text = res.text
+            response = await client.get(url)
+            page_content = response.text
 
-        # Regex pattern to extract the reel video URL from page source
-        video_url_match = re.search(r'"video_url":"([^"]+)"', text)
-        thumbnail_match = re.search(r'"thumbnail_url":"([^"]+)"', text)
-        caption_match = re.search(r'"title":"([^"]+)"', text)
+        # Extract video URL with regex
+        video_url_match = re.search(r'"video_url":"([^"]+)"', page_content)
+        thumbnail_match = re.search(r'"thumbnail_url":"([^"]+)"', page_content)
+        caption_match = re.search(r'"title":"([^"]+)"', page_content)
 
         if not video_url_match:
-            return JSONResponse({"status": "error", "message": "⚠️ Could not extract video URL. Make sure the reel is public."})
+            return JSONResponse({
+                "status": "error",
+                "message": "⚠️ Could not extract video URL. Make sure the reel is public."
+            })
 
         video_url = video_url_match.group(1).replace("\\u0026", "&")
         thumbnail = thumbnail_match.group(1).replace("\\u0026", "&") if thumbnail_match else None
@@ -46,6 +53,6 @@ async def download_reel(request: Request):
     except Exception as e:
         return JSONResponse({
             "status": "error",
-            "message": "❌ Failed to fetch the reel video.",
+            "message": "❌ Failed to fetch reel video.",
             "error": str(e)
         })
