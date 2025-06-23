@@ -1,58 +1,91 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-import httpx
-import re
+import os
+import shutil
+import uuid
+from fastapi import FastAPI, Query, HTTPException, Response
+from fastapi.responses import FileResponse, JSONResponse
+import yt_dlp
 
 app = FastAPI()
 
-def is_valid_instagram_reel_url(url: str) -> bool:
-    pattern = r'https?://(www\.)?instagram\.com/reel/[a-zA-Z0-9_-]+/?'
-    return bool(re.match(pattern, url))
+DOWNLOAD_DIR = "./downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-@app.get("/")
-async def instagram_reel_downloader(request: Request):
-    url = request.query_params.get("url")
-    if not url or not is_valid_instagram_reel_url(url):
-        return JSONResponse({
-            "status": "error",
-            "message": "❌ Invalid or missing Instagram Reel URL."
-        })
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+def extract_formats(url: str):
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
     }
-
-    try:
-        async with httpx.AsyncClient(headers=headers, timeout=10) as client:
-            response = await client.get(url)
-            page_content = response.text
-
-        # Extract video URL with regex
-        video_url_match = re.search(r'"video_url":"([^"]+)"', page_content)
-        thumbnail_match = re.search(r'"thumbnail_url":"([^"]+)"', page_content)
-        caption_match = re.search(r'"title":"([^"]+)"', page_content)
-
-        if not video_url_match:
-            return JSONResponse({
-                "status": "error",
-                "message": "⚠️ Could not extract video URL. Make sure the reel is public."
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    formats = []
+    for f in info.get("formats", []):
+        if f.get("format_id") and f.get("url"):
+            formats.append({
+                "format_id": f["format_id"],
+                "format_note": f.get("format_note", ""),
+                "ext": f.get("ext", ""),
+                "acodec": f.get("acodec"),
+                "vcodec": f.get("vcodec"),
+                "filesize": f.get("filesize") or f.get("filesize_approx"),
+                "resolution": f.get("resolution") or f.get("height"),
+                "url": f["url"],
             })
+    return formats
 
-        video_url = video_url_match.group(1).replace("\\u0026", "&")
-        thumbnail = thumbnail_match.group(1).replace("\\u0026", "&") if thumbnail_match else None
-        caption = caption_match.group(1) if caption_match else "Instagram Reel"
-
-        return JSONResponse({
-            "status": "success",
-            "video_url": video_url,
-            "thumbnail": thumbnail,
-            "caption": caption,
-            "message": "Made with ❤️ by Zero Creations - Join https://t.me/zerocreations"
-        })
-
+@app.get("/formats")
+async def get_formats(url: str = Query(..., description="Instagram reel URL")):
+    try:
+        formats = await run_blocking(extract_formats, url)
+        if not formats:
+            return JSONResponse({"status": "error", "message": "No formats found"})
+        return {"status": "success", "formats": formats}
     except Exception as e:
-        return JSONResponse({
-            "status": "error",
-            "message": "❌ Failed to fetch reel video.",
-            "error": str(e)
-        })
+        raise HTTPException(status_code=400, detail=str(e))
+
+def download_video_file(url: str, format_id: str):
+    unique_id = str(uuid.uuid4())
+    outtmpl = os.path.join(DOWNLOAD_DIR, f"{unique_id}.%(ext)s")
+    ydl_opts = {
+        "format": format_id,
+        "outtmpl": outtmpl,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+    return filename
+
+async def run_blocking(func, *args):
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, func, *args)
+
+@app.get("/download")
+async def download(
+    url: str = Query(..., description="Instagram reel URL"),
+    format_id: str = Query(..., description="Format ID to download"),
+):
+    try:
+        filepath = await run_blocking(download_video_file, url, format_id)
+        if not os.path.exists(filepath):
+            raise HTTPException(status_code=500, detail="File not found after download")
+
+        response = FileResponse(path=filepath, filename=os.path.basename(filepath), media_type="video/mp4")
+
+        # Cleanup after response is sent
+        async def cleanup():
+            await asyncio.sleep(5)  # wait 5 seconds for the response to finish
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass
+
+        import asyncio
+        asyncio.create_task(cleanup())
+
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
